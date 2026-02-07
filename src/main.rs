@@ -1,5 +1,7 @@
-use std::{ops::Neg, io::Write};
+use std::io::Write;
 use rand::Rng;
+use std::rc::Rc;
+use std::cell::RefCell;
 
 use bitflags::bitflags;
 
@@ -97,8 +99,8 @@ struct ModelVar {
     index: usize,
     flags: ModelVarFlags,
     op: ModelVarOp,
-    value: Matrix,
-    gradient: Matrix,
+    value: Rc<RefCell<Matrix>>,
+    gradient: Rc<RefCell<Matrix>>,
     inputs: [Option<usize>; MODEL_VAR_MAX_INPUTS],
 }
 
@@ -203,9 +205,9 @@ fn mat_fill(mat: &mut Matrix, x: f32) {
     mat.data.fill(x);
 }
 
-fn mat_fill_random(mat: &mut Matrix) {
+fn mat_fill_random(mat: &mut Matrix, lower: f32, upper: f32) {
     for v in mat.data.iter_mut() {
-        *v = rand::random::<f32>();
+        *v = rand::random::<f32>() * (upper - lower) + lower;
     }
 }
 
@@ -220,7 +222,9 @@ fn mat_sum(mat: &Matrix) -> f32 {
 fn mat_argmax(mat: &Matrix) -> usize {
     mat.data.iter()
         .enumerate()
-        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+        .max_by(|(_, a), (_, b)| {
+            a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+        })
         .map(|(idx, _)| idx)
         .unwrap_or(0)
 }
@@ -307,7 +311,7 @@ fn mat_mul_tn(out: &mut Matrix, a: &Matrix, b: &Matrix) {
 }
 
 fn mat_mul_tt(out: &mut Matrix, a: &Matrix, b: &Matrix) {
-    for k in 0..a.cols {
+    for k in 0..a.rows {
         for i in 0..out.rows {
             let a_ki = a.data[a.idx(k, i)];
             for j in 0..out.cols {
@@ -423,7 +427,7 @@ fn mat_cross_entropy(out: &mut Matrix, p: &Matrix, q: &Matrix) -> Result<(), Mat
         *o = if p_val < EPSILON {
             0.0
         } else {
-            p_val * -q_val.ln()
+            p_val * -(q_val + EPSILON).ln()
         };
     }
 
@@ -442,8 +446,8 @@ impl ModelVar {
             index: model.num_vars,
             flags,
             op: ModelVarOp::Create,
-            value: Matrix::new(rows, cols),
-            gradient: grad,
+            value: Rc::new(RefCell::new(Matrix::new(rows, cols))),
+            gradient: Rc::new(RefCell::new(grad)),
             inputs: [None, None],
         };
 
@@ -473,11 +477,13 @@ fn mv_relu(
     input: &ModelVar,
     flags: ModelVarFlags,
 ) -> Result<ModelVar, MatrixError> {
+    let rows = input.value.borrow().rows;
+    let cols = input.value.borrow().cols;
     ModelVar::mv_unary_impl(
         model,
         input,
-        input.value.rows,
-        input.value.cols,
+        rows,
+        cols,
         flags,
         ModelVarOp::Relu,
     )
@@ -488,11 +494,13 @@ fn mv_softmax(
     input: &ModelVar,
     flags: ModelVarFlags,
 ) -> Result<ModelVar, MatrixError> {
+    let rows = input.value.borrow().rows;
+    let cols = input.value.borrow().cols;
     ModelVar::mv_unary_impl(
         model,
         input,
-        input.value.rows,
-        input.value.cols,
+        rows,
+        cols,
         flags,
         ModelVarOp::Softmax,
     )
@@ -504,19 +512,23 @@ fn mv_add(
     b: &ModelVar,
     flags: ModelVarFlags,
 ) -> Result<ModelVar, MatrixError> {
-    if a.value.rows != b.value.rows || a.value.cols != b.value.cols {
+    let a_rows = a.value.borrow().rows;
+    let a_cols = a.value.borrow().cols;
+    let b_rows = b.value.borrow().rows;
+    let b_cols = b.value.borrow().cols;
+    if a_rows != b_rows || a_cols != b_cols {
         return Err(MatrixError::DimensionMismatch {
             context: "mv_add: operand dimensions mismatch".to_string(),
-            expected: (a.value.rows, a.value.cols),
-            got: (b.value.rows, b.value.cols),
+            expected: (a_rows, a_cols),
+            got: (b_rows, b_cols),
         });
     }
     ModelVar::mv_binary_impl(
         model,
         a,
         b,
-        a.value.rows,
-        a.value.cols,
+        a_rows,
+        a_cols,
         flags,
         ModelVarOp::Add,
     )
@@ -528,19 +540,23 @@ fn mv_sub(
     b: &ModelVar,
     flags: ModelVarFlags,
 ) -> Result<ModelVar, MatrixError> {
-    if a.value.rows != b.value.rows || a.value.cols != b.value.cols {
+    let a_rows = a.value.borrow().rows;
+    let a_cols = a.value.borrow().cols;
+    let b_rows = b.value.borrow().rows;
+    let b_cols = b.value.borrow().cols;
+    if a_rows != b_rows || a_cols != b_cols {
         return Err(MatrixError::DimensionMismatch {
             context: "mv_sub: operand dimensions mismatch".to_string(),
-            expected: (a.value.rows, a.value.cols),
-            got: (b.value.rows, b.value.cols),
+            expected: (a_rows, a_cols),
+            got: (b_rows, b_cols),
         });
     }
     ModelVar::mv_binary_impl(
         model,
         a,
         b,
-        a.value.rows,
-        a.value.cols,
+        a_rows,
+        a_cols,
         flags,
         ModelVarOp::Sub,
     )
@@ -552,19 +568,23 @@ fn mv_cross_entropy(
     q: &ModelVar,
     flags: ModelVarFlags,
 ) -> Result<ModelVar, MatrixError> {
-    if p.value.rows != q.value.rows || p.value.cols != q.value.cols {
+    let p_rows = p.value.borrow().rows;
+    let p_cols = p.value.borrow().cols;
+    let q_rows = q.value.borrow().rows;
+    let q_cols = q.value.borrow().cols;
+    if p_rows != q_rows || p_cols != q_cols {
         return Err(MatrixError::DimensionMismatch {
             context: "mv_cross_entropy: operand dimensions mismatch".to_string(),
-            expected: (p.value.rows, p.value.cols),
-            got: (q.value.rows, q.value.cols),
+            expected: (p_rows, p_cols),
+            got: (q_rows, q_cols),
         });
     }
     ModelVar::mv_binary_impl(
         model,
         p,
         q,
-        p.value.rows,
-        p.value.cols,
+        p_rows,
+        p_cols,
         flags,
         ModelVarOp::CrossEntropy,
     )
@@ -576,10 +596,10 @@ fn mv_matmul(
     b: &ModelVar,
     flags: ModelVarFlags,
 ) -> Result<ModelVar, MatrixError> {
-    let a_rows = a.value.rows;
-    let a_cols = a.value.cols;
-    let b_rows = b.value.rows;
-    let b_cols = b.value.cols;
+    let a_rows = a.value.borrow().rows;
+    let a_cols = a.value.borrow().cols;
+    let b_rows = b.value.borrow().rows;
+    let b_cols = b.value.borrow().cols;
 
     if a_cols != b_rows {
         return Err(MatrixError::DimensionMismatch {
@@ -665,6 +685,8 @@ fn mat_cross_entropy_add_grad(
         });
     }
     let size = p.rows * p.cols;
+    const EPSILON: f32 = 1e-10;
+    
     if !p_grad.data.is_empty() {
         if p_grad.rows != p.rows || p_grad.cols != p.cols {
             return Err(MatrixError::DimensionMismatch {
@@ -673,8 +695,9 @@ fn mat_cross_entropy_add_grad(
                 got: (p_grad.rows, p_grad.cols),
             });
         }
+        // Gradient w.r.t. p (target): -log(q) * grad
         for i in 0..size {
-            p_grad.data[i] += (grad.data[i] * p.data[i]).neg().ln();
+            p_grad.data[i] += -grad.data[i] * (q.data[i] + EPSILON).ln();
         }
     }
 
@@ -686,8 +709,9 @@ fn mat_cross_entropy_add_grad(
                 got: (q_grad.rows, q_grad.cols),
             });
         }
+        // Gradient w.r.t. q (prediction): -p/q * grad
         for i in 0..size {
-            q_grad.data[i] += q_grad.data[i] / q.data[i] * grad.data[i];
+            q_grad.data[i] += -grad.data[i] * p.data[i] / (q.data[i] + EPSILON);
         }
     }
     Ok(())
@@ -767,29 +791,36 @@ fn model_prog_compute(
         let a_idx = prog.vars[i].inputs[0];
         let b_idx = prog.vars[i].inputs[1];
 
-        let a_value = a_idx.map(|idx| prog.vars[idx].value.clone());
-        let b_value = b_idx.map(|idx| prog.vars[idx].value.clone());
-
-        let cur_var: &mut ModelVar = &mut prog.vars[i];
+        let mut out_val = prog.vars[i].value.borrow_mut();
 
         match op {
             ModelVarOp::Add => {
-                mat_add(&mut cur_var.value, &a_value.unwrap(), &b_value.unwrap()).unwrap();
+                let a = prog.vars[a_idx.unwrap()].value.borrow();
+                let b = prog.vars[b_idx.unwrap()].value.borrow();
+                mat_add(&mut out_val, &a, &b).unwrap();
             },
             ModelVarOp::Sub => {
-                mat_sub(&mut cur_var.value, &a_value.unwrap(), &b_value.unwrap()).unwrap();
+                let a = prog.vars[a_idx.unwrap()].value.borrow();
+                let b = prog.vars[b_idx.unwrap()].value.borrow();
+                mat_sub(&mut out_val, &a, &b).unwrap();
             },
             ModelVarOp::MatMul => {
-                mat_mul(&mut cur_var.value, &a_value.unwrap(), &b_value.unwrap(), true, false, false).unwrap();
+                let a = prog.vars[a_idx.unwrap()].value.borrow();
+                let b = prog.vars[b_idx.unwrap()].value.borrow();
+                mat_mul(&mut out_val, &a, &b, true, false, false).unwrap();
             },
             ModelVarOp::Relu => {
-                mat_relu(&mut cur_var.value, &a_value.unwrap()).unwrap();
+                let a = prog.vars[a_idx.unwrap()].value.borrow();
+                mat_relu(&mut out_val, &a).unwrap();
             },
             ModelVarOp::Softmax => {
-                mat_softmax(&mut cur_var.value, &a_value.unwrap()).unwrap();
+                let a = prog.vars[a_idx.unwrap()].value.borrow();
+                mat_softmax(&mut out_val, &a).unwrap();
             },
             ModelVarOp::CrossEntropy => {
-                mat_cross_entropy(&mut cur_var.value, &a_value.unwrap(), &b_value.unwrap()).unwrap();
+                let a = prog.vars[a_idx.unwrap()].value.borrow();
+                let b = prog.vars[b_idx.unwrap()].value.borrow();
+                mat_cross_entropy(&mut out_val, &a, &b).unwrap();
             },
             _ => {}
         }
@@ -799,23 +830,27 @@ fn model_prog_compute(
 }
 
 fn model_prog_compute_grads(prog: &mut ModelProgram){
+    // Clear gradients for non-parameter variables
     for i in 0..prog.size{
         let cur: &mut ModelVar = &mut prog.vars[i];
-
         if !cur.flags.contains(ModelVarFlags::REQUIRES_GRAD) {
             continue;
         }
-        if !cur.flags.contains(ModelVarFlags::PARAMETER) {
+        // Skip parameters - they accumulate gradients across the batch
+        if cur.flags.contains(ModelVarFlags::PARAMETER) {
             continue;
         }
-        mat_clear(&mut cur.gradient);
+        mat_clear(&mut cur.gradient.borrow_mut());
     }
 
-        mat_fill(&mut prog.vars[prog.size-1].gradient, 1.0);
+    // Initialize output gradient to 1
+    mat_fill(&mut prog.vars[prog.size-1].gradient.borrow_mut(), 1.0);
 
     for i in (0..prog.size).rev() {
         let num_inputs = prog.vars[i].op.num_inputs();
         let op = prog.vars[i].op;
+        
+
         
         if !prog.vars[i].flags.contains(ModelVarFlags::REQUIRES_GRAD) {
             continue;
@@ -844,7 +879,7 @@ fn model_prog_compute_grads(prog: &mut ModelProgram){
         }
 
         // Extract values and gradient before mutating
-        let cur_gradient = prog.vars[i].gradient.clone();
+        let cur_gradient = prog.vars[i].gradient.borrow();
         let a_idx = prog.vars[i].inputs[0];
         let b_idx = prog.vars[i].inputs[1];
 
@@ -852,77 +887,73 @@ fn model_prog_compute_grads(prog: &mut ModelProgram){
             ModelVarOp::Add => {
                 if let Some(idx) = a_idx {
                     if prog.vars[idx].flags.contains(ModelVarFlags::REQUIRES_GRAD) {
-                        let a_grad_clone = prog.vars[idx].gradient.clone();
-                        mat_add(&mut prog.vars[idx].gradient, &a_grad_clone, &cur_gradient).unwrap();
+                        let mut a_grad = prog.vars[idx].gradient.borrow_mut();
+                        // Manually accumulate to avoid double borrow
+                        for (a, c) in a_grad.data.iter_mut().zip(cur_gradient.data.iter()) { *a += c; }
                     }
                 }
                 if let Some(idx) = b_idx {
                     if prog.vars[idx].flags.contains(ModelVarFlags::REQUIRES_GRAD) {
-                        let b_grad_clone = prog.vars[idx].gradient.clone();
-                        mat_add(&mut prog.vars[idx].gradient, &b_grad_clone, &cur_gradient).unwrap();
+                        let mut b_grad = prog.vars[idx].gradient.borrow_mut();
+                        for (b, c) in b_grad.data.iter_mut().zip(cur_gradient.data.iter()) { *b += c; }
                     }
                 }
             },
             ModelVarOp::Sub => {
                 if let Some(idx) = a_idx {
                     if prog.vars[idx].flags.contains(ModelVarFlags::REQUIRES_GRAD) {
-                        let a_grad_clone = prog.vars[idx].gradient.clone();
-                        mat_add(&mut prog.vars[idx].gradient, &a_grad_clone, &cur_gradient).unwrap();
+                        let mut a_grad = prog.vars[idx].gradient.borrow_mut();
+                        for (a, c) in a_grad.data.iter_mut().zip(cur_gradient.data.iter()) { *a += c; }
                     }
                 }
                 if let Some(idx) = b_idx {
                     if prog.vars[idx].flags.contains(ModelVarFlags::REQUIRES_GRAD) {
-                        let b_grad_clone = prog.vars[idx].gradient.clone();
-                        mat_sub(&mut prog.vars[idx].gradient, &b_grad_clone, &cur_gradient).unwrap();
+                        let mut b_grad = prog.vars[idx].gradient.borrow_mut();
+                        for (b, c) in b_grad.data.iter_mut().zip(cur_gradient.data.iter()) { *b -= c; }
                     }
                 }
             },
             ModelVarOp::MatMul => {
                 if let (Some(a_idx), Some(b_idx)) = (a_idx, b_idx) {
-                    let b_value = prog.vars[b_idx].value.clone();
-                    let a_value = prog.vars[a_idx].value.clone();
+                    let b_value = prog.vars[b_idx].value.borrow();
+                    let a_value = prog.vars[a_idx].value.borrow();
                     
                     if prog.vars[a_idx].flags.contains(ModelVarFlags::REQUIRES_GRAD) {
-                        mat_mul(&mut prog.vars[a_idx].gradient, &cur_gradient, &b_value, false, false, true).unwrap();
+                        mat_mul(&mut prog.vars[a_idx].gradient.borrow_mut(), &cur_gradient, &b_value, false, false, true).unwrap();
                     }
                     if prog.vars[b_idx].flags.contains(ModelVarFlags::REQUIRES_GRAD) {
-                        mat_mul(&mut prog.vars[b_idx].gradient, &a_value, &cur_gradient, false, true, false).unwrap();
+                        mat_mul(&mut prog.vars[b_idx].gradient.borrow_mut(), &a_value, &cur_gradient, false, true, false).unwrap();
                     }
                 }
             },
             ModelVarOp::CrossEntropy => {
                 if let (Some(p_idx), Some(q_idx)) = (a_idx, b_idx) {
-                    if prog.vars[p_idx].flags.contains(ModelVarFlags::REQUIRES_GRAD) ||
-                       prog.vars[q_idx].flags.contains(ModelVarFlags::REQUIRES_GRAD) {
-                        let p_value = prog.vars[p_idx].value.clone();
-                        let q_value = prog.vars[q_idx].value.clone();
-                        let (left, right) = if p_idx < q_idx {
-                            let (l, r) = prog.vars.split_at_mut(q_idx);
-                            (&mut l[p_idx].gradient, &mut r[0].gradient)
-                        } else {
-                            let (l, r) = prog.vars.split_at_mut(p_idx);
-                            (&mut r[q_idx - p_idx].gradient, &mut l[p_idx].gradient)
-                        };
-                        mat_cross_entropy_add_grad(
-                            left,
-                            right,
-                            &p_value,
-                            &q_value,
-                            &cur_gradient
-                        ).unwrap();
-                    }
+                    let p_value = prog.vars[p_idx].value.borrow();
+                    let q_value = prog.vars[q_idx].value.borrow();
+                    
+                    mat_cross_entropy_add_grad(
+                        &mut prog.vars[p_idx].gradient.borrow_mut(),
+                        &mut prog.vars[q_idx].gradient.borrow_mut(),
+                        &p_value,
+                        &q_value,
+                        &cur_gradient
+                    ).unwrap();
                 }
             },
             ModelVarOp::Relu => {
                 if let Some(idx) = a_idx {
-                    let a_value = prog.vars[idx].value.clone();
-                    mat_relu_add_grad(&mut prog.vars[idx].gradient, &a_value, &cur_gradient).unwrap();
+                    if prog.vars[idx].flags.contains(ModelVarFlags::REQUIRES_GRAD) {
+                        let a_value = prog.vars[idx].value.borrow();
+                        mat_relu_add_grad(&mut prog.vars[idx].gradient.borrow_mut(), &a_value, &cur_gradient).unwrap();
+                    }
                 }
             },
             ModelVarOp::Softmax => {
                 if let Some(idx) = a_idx {
-                    let a_value = prog.vars[idx].value.clone();
-                    mat_softmax_add_grad(&mut prog.vars[idx].gradient, &a_value, &cur_gradient).unwrap();
+                    if prog.vars[idx].flags.contains(ModelVarFlags::REQUIRES_GRAD) {
+                        let softmax_output = prog.vars[i].value.borrow();
+                        mat_softmax_add_grad(&mut prog.vars[idx].gradient.borrow_mut(), &softmax_output, &cur_gradient).unwrap();
+                    }
                 }
             },
             _ => {}
@@ -962,9 +993,12 @@ fn create_mnist_model(model: &mut ModelContext) -> Result<(), MatrixError> {
     let mut w1 = ModelVar::create(model, 16, 16, ModelVarFlags::PARAMETER | ModelVarFlags::REQUIRES_GRAD)?;
     let mut w2 = ModelVar::create(model, 10, 16, ModelVarFlags::PARAMETER | ModelVarFlags::REQUIRES_GRAD)?;
 
-    mat_fill_random(&mut w0.value);
-    mat_fill_random(&mut w1.value);
-    mat_fill_random(&mut w2.value);
+    let bound0 = (6.0f32 / (784 + 16) as f32).sqrt();
+    let bound1 = (6.0f32 / (16 + 16) as f32).sqrt();
+    let bound2 = (6.0f32 / (16 + 10) as f32).sqrt();
+    mat_fill_random(&mut w0.value.borrow_mut(), -bound0, bound0);
+    mat_fill_random(&mut w1.value.borrow_mut(), -bound1, bound1);
+    mat_fill_random(&mut w2.value.borrow_mut(), -bound2, bound2);
 
     let b0 = ModelVar::create(model, 16, 1, ModelVarFlags::PARAMETER | ModelVarFlags::REQUIRES_GRAD)?;
     let b1 = ModelVar::create(model, 16, 1, ModelVarFlags::PARAMETER | ModelVarFlags::REQUIRES_GRAD)?;
@@ -984,7 +1018,7 @@ fn create_mnist_model(model: &mut ModelContext) -> Result<(), MatrixError> {
     let output = mv_softmax(model, &z2_b, ModelVarFlags::OUTPUT)?;
 
     let desired_output = ModelVar::create(model, 10, 1, ModelVarFlags::DESIRED_OUTPUT)?;
-    let cost = mv_cross_entropy(model, &desired_output, &output, ModelVarFlags::COST)?;
+    let _cost = mv_cross_entropy(model, &desired_output, &output, ModelVarFlags::COST)?;
 
     Ok(())
 }
@@ -1047,7 +1081,7 @@ fn model_train(
             for i in 0..model.cost_program.size {
                 let cur = &mut model.cost_program.vars[i];
                 if cur.flags.contains(ModelVarFlags::PARAMETER) {
-                    mat_clear(&mut cur.gradient);
+                    mat_clear(&mut cur.gradient.borrow_mut());
                 }
             }
 
@@ -1058,20 +1092,20 @@ fn model_train(
 
                 // Copy input image
                 mat_copy(
-                    &mut model.cost_program.vars[prog_input_idx].value,
+                    &mut model.cost_program.vars[prog_input_idx].value.borrow_mut(),
                     &train_images[index]
                 )?;
 
                 // Copy desired output label
                 mat_copy(
-                    &mut model.cost_program.vars[prog_desired_output_idx].value,
+                    &mut model.cost_program.vars[prog_desired_output_idx].value.borrow_mut(),
                     &train_labels[index]
                 )?;
 
                 model_prog_compute(&mut model.cost_program);
                 model_prog_compute_grads(&mut model.cost_program);
 
-                avg_cost += mat_sum(&model.cost_program.vars[prog_cost_idx].value);
+                avg_cost += mat_sum(&model.cost_program.vars[prog_cost_idx].value.borrow());
             }
             avg_cost /= training_desc.batch_size as f32;
 
@@ -1083,12 +1117,18 @@ fn model_train(
                     continue;
                 }
 
+                let mut grad = cur.gradient.borrow_mut();
+                let mut val = cur.value.borrow_mut();
+
                 mat_scale(
-                    &mut cur.gradient,
+                    &mut grad,
                     training_desc.learning_rate / training_desc.batch_size as f32
                 );
-                let cur_value_clone = cur.value.clone();
-                mat_sub(&mut cur.value, &cur_value_clone, &cur.gradient)?;
+                
+                // cur.value = cur.value - cur.gradient
+                for j in 0..val.data.len() {
+                    val.data[j] -= grad.data[j];
+                }
             }
 
             print!(
@@ -1105,21 +1145,21 @@ fn model_train(
         let mut avg_cost = 0.0f32;
         for i in 0..num_tests {
             mat_copy(
-                &mut model.cost_program.vars[prog_input_idx].value,
+                &mut model.cost_program.vars[prog_input_idx].value.borrow_mut(),
                 &test_images[i]
             )?;
 
             mat_copy(
-                &mut model.cost_program.vars[prog_desired_output_idx].value,
+                &mut model.cost_program.vars[prog_desired_output_idx].value.borrow_mut(),
                 &test_labels[i]
             )?;
 
             model_prog_compute(&mut model.cost_program);
 
-            avg_cost += mat_sum(&model.cost_program.vars[prog_cost_idx].value);
+            avg_cost += mat_sum(&model.cost_program.vars[prog_cost_idx].value.borrow());
             
-            if mat_argmax(&model.cost_program.vars[prog_output_idx].value) ==
-               mat_argmax(&model.cost_program.vars[prog_desired_output_idx].value) {
+            if mat_argmax(&model.cost_program.vars[prog_output_idx].value.borrow()) ==
+               mat_argmax(&model.cost_program.vars[prog_desired_output_idx].value.borrow()) {
                 num_correct += 1;
             }
         }
@@ -1211,4 +1251,3 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\nTraining complete!");
     Ok(())
 }
-
