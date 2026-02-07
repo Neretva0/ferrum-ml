@@ -1,6 +1,6 @@
 # ML Library - Rust
 
-A lightweight machine learning library written in pure Rust featuring automatic differentiation and neural network training capabilities.
+A lightweight machine learning library written in pure Rust featuring automatic differentiation and neural network training capabilities. Inspired by MagicalBat, which implements a minimal ML framework in C.
 
 ## Overview
 
