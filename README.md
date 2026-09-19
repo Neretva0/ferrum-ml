@@ -1,231 +1,259 @@
 # ML Library - Rust
 
-A lightweight machine learning library written in pure Rust featuring automatic differentiation and neural network training capabilities. Inspired by MagicalBat, which implements a minimal ML framework in C.
+A lightweight, modular machine learning library written in pure Rust featuring automatic differentiation and neural network training capabilities. Inspired by MagicalBat, which implements a minimal ML framework in C.
 
 ## Overview
 
 This library provides a complete computational graph framework with automatic differentiation, supporting the construction and training of neural networks. Built from scratch without relying on heavy ML frameworks, it includes:
 
-- Custom matrix operations optimized for neural networks
+- Custom 2D matrix operations optimized for neural network workloads
 - Automatic differentiation via reverse-mode backpropagation
-- Flexible computational graph construction
-- Training loop with mini-batch gradient descent
-- MNIST digit classification example
+- Flexible computational graph construction with topological compilation
+- Mini-batch stochastic gradient descent (SGD) training pipeline
+- Modular architecture with clean separation of concerns
+- End-to-end MNIST digit classification example
 
 ## Features
 
-- ✅ Pure Rust implementation with minimal dependencies
-- ✅ Automatic gradient computation for all operations
-- ✅ Topological sorting for efficient computation
-- ✅ Support for common activation functions (ReLU, Softmax)
-- ✅ Cross-entropy loss for classification tasks
-- ✅ Mini-batch stochastic gradient descent
-- ✅ MNIST example achieving good accuracy
+- Pure Rust implementation with minimal dependencies
+- Modular codebase partitioned into dedicated modules (`matrix`, `matmul`, `ops`, `graph`, `training`, `mnist_model`)
+- Shared buffer semantics with `Rc<RefCell<Matrix>>` for zero-copy graph program execution
+- Automatic gradient computation across all operations
+- Topological sorting with graph-to-program index remapping
+- Common activation functions (ReLU, Softmax) and Cross-Entropy loss with full analytical backward gradients
+- Mini-batch SGD optimizer with dataset shuffling
+- MNIST example achieving ~95% test accuracy on handwritten digit recognition
 
-## Core Components
+## Project Structure
 
-### Error Handling
+The codebase is organized into focused, decoupled modules:
 
-**`MatrixError`**  
-Custom error type for matrix operations that tracks dimension mismatches with detailed context about what operation failed and the expected vs. actual dimensions.
+```text
+src/
+├── main.rs          # Application entrypoint running the MNIST training pipeline
+├── matrix.rs        # Matrix struct, MatrixError, and basic element-wise & reduction ops
+├── matmul.rs        # Optimized matrix multiplication kernels with transpose variations
+├── ops.rs           # Activation functions & loss (ReLU, Softmax, CrossEntropy) + backward gradients
+├── graph/           # Computational graph & automatic differentiation engine
+│   ├── mod.rs       # Core types: ModelVar, ModelVarFlags, ModelVarOp, ModelProgram, ModelContext
+│   ├── build.rs     # Graph construction helpers (mv_add, mv_matmul, mv_relu, mv_softmax, etc.)
+│   └── program.rs   # Topological compilation (model_compile), forward & backward passes
+├── training.rs      # Mini-batch SGD training loop and evaluation (ModelTrainingDesc, model_train)
+└── mnist_model.rs   # MNIST model architecture (MLP + residual) and dataset preprocessing
+```
 
-### Data Structures
+---
 
-**`Matrix`**  
-Represents a 2D matrix using:
-- `rows`: number of rows
-- `cols`: number of columns
-- `data`: flat vector of `f32` values (row-major order)
+## Core Modules & API Reference
 
-Includes helper method `idx()` for converting 2D coordinates to flat array indices.
+### 1. Matrix (`src/matrix.rs`)
 
-**`ModelVar`**  
-Represents a variable node in the computation graph:
-- `index`: unique identifier in the model context
-- `flags`: bitflags indicating variable properties
-- `op`: operation that created this variable
-- `value`: current matrix value
-- `gradient`: accumulated gradient (if requires_grad is set)
-- `inputs`: indices of input variables (up to 2)
+Provides the fundamental data structures and elementary operations.
 
-**`ModelProgram`**  
-Topologically sorted list of `ModelVar` operations for efficient forward/backward passes:
-- `vars`: ordered variables for computation
-- `size`: number of variables in the program
+#### Types
+- **`Matrix`**: Represents a 2D matrix storing values in a row-major `Vec<f32>`:
+  - `rows`: Number of rows
+  - `cols`: Number of columns
+  - `data`: Flat `Vec<f32>` storage
+  - `Matrix::new(rows, cols)`: Creates a zero-initialized matrix
+  - `Matrix::idx(&self, row, col)`: Converts 2D coordinates into a 1D index
+- **`MatrixError`**: Custom error enum reporting dimension mismatches with contextual descriptions and `(expected, got)` shape tuples.
 
-**`ModelContext`**  
-Central context managing the computation graph:
-- Tracks all variables created
-- Maintains references to special variables (input, output, desired output, cost)
-- Compiles forward and cost computation programs
+#### Operations
+- `mat_copy(dst, src)`: Copies contents between identically sized matrices
+- `mat_clear(mat)`: Zeroes out all elements in-place
+- `mat_fill(mat, x)`: Fills all elements with scalar `x`
+- `mat_fill_random(mat, lower, upper)`: Uniform random initialization within `[lower, upper)`
+- `mat_scale(mat, x)`: In-place scalar multiplication
+- `mat_sum(mat) -> f32`: Computes the sum of all elements
+- `mat_argmax(mat) -> usize`: Finds the index of the maximum element
+- `mat_add(out, a, b)`: Element-wise addition ($out = a + b$)
+- `mat_sub(out, a, b)`: Element-wise subtraction ($out = a - b$)
+- `mat_add_assign(a, b)`: In-place addition ($a \mathrel{+}= b$)
 
-## Basic Matrix Operations
+---
 
-- **`mat_copy()`** - Copy data from source matrix to destination
-- **`mat_clear()`** - Fill matrix with zeros
-- **`mat_fill()`** - Fill matrix with a specific scalar value
-- **`mat_fill_random()`** - Fill matrix with random values
-- **`mat_scale()`** - Multiply all elements by a scalar
-- **`mat_sum()`** - Sum all elements in matrix
-- **`mat_argmax()`** - Find index of maximum element
-- **`mat_add()`** - Element-wise addition of two matrices
-- **`mat_sub()`** - Element-wise subtraction of two matrices
+### 2. Matrix Multiplication (`src/matmul.rs`)
 
-## Matrix Multiplication
+High-performance matrix multiplication kernels supporting arbitrary transpose combinations without allocating intermediate transposed matrices.
 
-Supports flexible matrix multiplication with transpose options:
+#### Low-level Kernels
+- **`mat_mul_nn(out, a, b)`**: Standard multiplication ($A \times B$)
+- **`mat_mul_nt(out, a, b)`**: Transposed second operand ($A \times B^T$)
+- **`mat_mul_tn(out, a, b)`**: Transposed first operand ($A^T \times B$)
+- **`mat_mul_tt(out, a, b)`**: Both operands transposed ($A^T \times B^T$)
 
-- **`mat_mul_nn()`** - Standard multiplication (A × B)
-- **`mat_mul_nt()`** - A × B^T (B transposed)
-- **`mat_mul_tn()`** - A^T × B (A transposed)
-- **`mat_mul_tt()`** - A^T × B^T (both transposed)
+#### Dispatcher
+- **`mat_mul(out, a, b, zero_out, transpose_a, transpose_b) -> Result<(), MatrixError>`**: Validates inner and output dimensions, clears `out` if `zero_out` is true, and dispatches to the corresponding kernel.
 
-Main function **`mat_mul()`** handles validation and dispatches to the appropriate variant based on transpose flags.
+---
 
-## Activation Functions & Loss
+### 3. Activation Functions & Loss (`src/ops.rs`)
 
-**Forward Operations:**
-- **`mat_relu()`** - Rectified Linear Unit: max(x, 0)
-- **`mat_softmax()`** - Softmax activation, normalizes to probability distribution
-- **`mat_cross_entropy()`** - Cross-entropy loss between predicted and target distributions
+Implements forward and analytical backward gradient passes for nonlinear activations and cost functions.
 
-**Gradient Operations:**
-- **`mat_relu_add_grad()`** - Accumulate gradients through ReLU
-- **`mat_softmax_add_grad()`** - Accumulate gradients through Softmax using Jacobian
-- **`mat_cross_entropy_add_grad()`** - Accumulate gradients through cross-entropy loss
+#### Forward Passes
+- **`mat_relu(out, input)`**: Element-wise ReLU activation ($\max(x, 0)$)
+- **`mat_softmax(out, input)`**: Numerically normalized softmax probability distribution
+- **`mat_cross_entropy(out, p, q)`**: Multi-class cross-entropy loss between distribution $p$ and target $q$ with $\epsilon$-clamping ($10^{-10}$) to avoid $\ln(0)$
 
-## Computational Graph API
+#### Backward Gradients
+- **`mat_relu_add_grad(out, input, grad)`**: Accumulates gradient through the ReLU subgradient ($out \mathrel{+}= grad \times \mathbb{I}_{x > 0}$)
+- **`mat_softmax_add_grad(out, softmax_out, grad)`**: Computes the exact Jacobian-vector product for softmax and accumulates into `out`
+- **`mat_cross_entropy_add_grad(p_grad, q_grad, p, q, grad)`**: Accumulates analytical loss gradients with respect to both probability inputs and target inputs
 
-**Variable Flags:**
-- `REQUIRES_GRAD` - Variable requires gradient computation
-- `PARAMETER` - Trainable parameter
-- `INPUT` - Network input
-- `OUTPUT` - Network output
-- `DESIRED_OUTPUT` - Target/label for training
-- `COST` - Loss function output
+---
 
-**Operations:**
-- `Create` - Variable creation
-- `Add`, `Sub` - Element-wise arithmetic
-- `MatMul` - Matrix multiplication
-- `Relu` - ReLU activation
-- `Softmax` - Softmax activation
-- `CrossEntropy` - Cross-entropy loss
+### 4. Computational Graph (`src/graph/`)
 
-**Graph Construction Functions:**
-- **`mv_relu()`** - Create ReLU operation node
-- **`mv_softmax()`** - Create Softmax operation node
-- **`mv_add()`** - Create addition operation node
-- **`mv_sub()`** - Create subtraction operation node
-- **`mv_matmul()`** - Create matrix multiplication node
-- **`mv_cross_entropy()`** - Create cross-entropy loss node
+The core automatic differentiation and computation graph engine, divided into types, graph-building primitives, and program execution.
 
-## Compilation & Execution
+#### Core Types (`src/graph/mod.rs`)
+- **`ModelVar`**: A variable node in the graph:
+  - `index`: Global graph variable identifier
+  - `flags`: Variable properties (`ModelVarFlags`)
+  - `op`: Generating operation (`ModelVarOp`)
+  - `value`: Shared matrix buffer wrapped in `Rc<RefCell<Matrix>>`
+  - `gradient`: Shared gradient buffer wrapped in `Rc<RefCell<Matrix>>`
+  - `inputs`: Dependency variable indices `[Option<usize>; 2]`
+- **`ModelVarFlags`**: Bitflags representing node roles:
+  - `NONE`: Intermediate node without special flags
+  - `REQUIRES_GRAD`: Node requires gradient calculation during backward pass
+  - `PARAMETER`: Trainable weight or bias parameter
+  - `INPUT`: Primary input placeholder (e.g., feature matrix)
+  - `OUTPUT`: Primary inference output placeholder
+  - `DESIRED_OUTPUT`: Supervised ground truth / target labels
+  - `COST`: Loss / objective function output
+- **`ModelVarOp`**: Operation types (`Null`, `Create`, `Relu`, `Softmax`, `Add`, `Sub`, `MatMul`, `CrossEntropy`). Exposes `num_inputs()` for arity checks.
+- **`ModelProgram`**: Topologically sorted, flattened execution sequence of variables. Provides `find_by_flag(flag)` for lookup.
+- **`ModelContext`**: Master context tracking all graph variables, key tensor indices, and compiled programs (`forward_program`, `cost_program`).
 
-**`ModelContext::create_program()`**  
-Performs topological sort on computation graph to create efficient execution programs. Visits dependencies recursively to ensure operations execute in correct order.
+#### Graph Construction (`src/graph/build.rs`)
+- **`ModelVar::create(...)`**: Low-level node factory allocating buffers and tracking graph indices
+- **`mv_add(model, a, b, flags)`**: Addition operation node
+- **`mv_sub(model, a, b, flags)`**: Subtraction operation node
+- **`mv_matmul(model, a, b, flags)`**: Matrix multiplication operation node
+- **`mv_relu(model, input, flags)`**: ReLU activation node
+- **`mv_softmax(model, input, flags)`**: Softmax activation node
+- **`mv_cross_entropy(model, p, q, flags)`**: Cross-entropy cost node
 
-**`model_prog_compute()`**  
-Executes forward pass through a program, computing all variable values in topological order.
+#### Program Compilation & Execution (`src/graph/program.rs`)
+- **`ModelContext::create_program(&self, all_vars, out_var_idx) -> ModelProgram`**: Performs depth-first topological sorting from the target node, resolving dependencies and remapping global indices into compact program-local indices.
+- **`model_compile(model)`**: Compiles both `forward_program` (from output node) and `cost_program` (from cost node).
+- **`model_prog_compute(prog)`**: Evaluates the program forward pass in topological order.
+- **`model_prog_compute_grads(prog)`**: Reverse-mode automatic differentiation through the compiled program. Clears intermediate gradients, seeds cost gradient to 1.0, and backpropagates through operations in reverse topological order.
+- **`model_feedforward(model)`**: Convenience helper running the compiled `forward_program`.
 
-**`model_prog_compute_grads()`**  
-Executes backward pass, computing gradients via reverse-mode automatic differentiation. Handles all operation types including Add, Sub, MatMul, ReLU, Softmax, and CrossEntropy.
+---
 
-**`modele_compile()`**  
-Compiles both forward and cost computation programs from the graph.
+### 5. Training Pipeline (`src/training.rs`)
 
-**`model_feedforward()`**  
-Runs forward computation program to produce outputs.
+Implements mini-batch stochastic gradient descent (SGD) and evaluation.
 
-## Training
+- **`ModelTrainingDesc`**:
+  - `train_images`, `train_labels`: Training dataset matrices
+  - `test_images`, `test_labels`: Validation/test dataset matrices
+  - `epochs`: Number of full passes over the dataset
+  - `batch_size`: Mini-batch size
+  - `learning_rate`: Gradient descent step size ($\alpha$)
+- **`model_train(model, training_desc)`**:
+  1. Shuffles training sample indices before each epoch using `rand`.
+  2. For each mini-batch:
+     - Zeroes out parameter gradients.
+     - Copies inputs and targets into the compiled cost program.
+     - Runs forward pass (`model_prog_compute`) and backward pass (`model_prog_compute_grads`).
+     - Scales accumulated parameter gradients by $\frac{\alpha}{\text{batch\_size}}$ and performs gradient descent update ($W \mathrel{-}= \frac{\alpha}{B} \nabla W$).
+  3. Evaluates test set accuracy and cost after each epoch.
 
-**`ModelTrainingDesc`**  
-Training configuration structure:
-- Training and test datasets (images and labels)
-- `epochs`: number of training epochs
-- `batch_size`: mini-batch size
-- `learning_rate`: learning rate for gradient descent
+---
 
-**`model_train()`**  
-Full training loop implementation:
-1. Shuffles training data each epoch
-2. Processes mini-batches
-3. Computes forward pass and loss
-4. Computes gradients via backpropagation
-5. Updates parameters using gradient descent
-6. Reports training progress and test accuracy
+### 6. MNIST Neural Network (`src/mnist_model.rs`)
 
-## Example: MNIST Neural Network
+End-to-end multi-layer perceptron (MLP) for digit classification.
 
-**`create_mnist_model()`**  
-Constructs a 3-layer neural network for MNIST digit classification:
+- **`prepare_mnist_data(...)`**: Converts raw byte slices into normalized column vectors ($784 \times 1$ inputs scaled to $[0.0, 1.0]$ and $10 \times 1$ one-hot label vectors).
+- **`create_mnist_model(model)`**: Builds a 3-layer neural network with a residual connection:
+  - **Input**: $784 \times 1$
+  - **Layer 0**: Linear($784 \to 16$) + ReLU
+  - **Layer 1**: Linear($16 \to 16$) + ReLU + Residual skip connection ($a_1 = \text{ReLU}(W_1 a_0 + b_1) + a_0$)
+  - **Layer 2**: Linear($16 \to 10$) + Softmax
+  - **Weights**: Xavier/Glorot uniform initialization ($\pm\sqrt{6 / (d_{in} + d_{out})}$)
+  - **Biases**: Initialized to zeros
+  - **Loss**: Cross-entropy cost node against one-hot target
 
-**Architecture:**
-- Input: 784 dimensions (28×28 flattened image)
-- Hidden Layer 1: 16 neurons with ReLU activation
-- Hidden Layer 2: 16 neurons with ReLU and residual connection
-- Output Layer: 10 neurons with Softmax activation
-- Loss: Cross-entropy
-
-**Layers:**
-1. **Layer 0**: Linear(784 → 16) + ReLU
-2. **Layer 1**: Linear(16 → 16) + ReLU + Residual
-3. **Layer 2**: Linear(16 → 10) + Softmax
-
-All weight matrices initialized with random values. Biases initialized to zero.
+---
 
 ## Example Usage
 
+### 1. Matrix Math
+
 ```rust
-// Basic matrix multiplication
-let mut a = Matrix::new(2, 3);
-let mut b = Matrix::new(3, 2);
-let mut out = Matrix::new(2, 2);
+use ml_lib_rust::matrix::{Matrix, mat_fill};
+use ml_lib_rust::matmul::mat_mul;
 
-mat_fill(&mut a, 1.0);
-mat_fill(&mut b, 2.0);
-mat_mul(&mut out, &a, &b, true, false, false)?;
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut a = Matrix::new(2, 3);
+    let mut b = Matrix::new(3, 2);
+    let mut out = Matrix::new(2, 2);
 
-// Create and train a neural network
-let mut model = ModelContext::create();
-create_mnist_model(&mut model)?;
-modele_compile(&mut model);
+    mat_fill(&mut a, 1.0);
+    mat_fill(&mut b, 2.0);
 
-let training_desc = ModelTrainingDesc {
-    train_images: /* training images */,
-    train_labels: /* training labels */,
-    test_images: /* test images */,
-    test_labels: /* test labels */,
-    epochs: 10,
-    batch_size: 32,
-    learning_rate: 0.01,
-};
-
-model_train(&mut model, &training_desc)?;
+    // out = A * B (clearing out first, no transposition)
+    mat_mul(&mut out, &a, &b, true, false, false)?;
+    assert_eq!(out.data, vec![6.0, 6.0, 6.0, 6.0]);
+    Ok(())
+}
 ```
 
-## Error Handling
+### 2. Neural Network Construction & Training
 
-All operations that can fail return `Result<T, MatrixError>` or `Result<T, Box<dyn std::error::Error>>` for comprehensive error checking with detailed context about dimension mismatches and other failures.
+```rust
+use ml_lib_rust::graph::ModelContext;
+use ml_lib_rust::graph::program::model_compile;
+use ml_lib_rust::mnist_model::{create_mnist_model, prepare_mnist_data};
+use ml_lib_rust::training::{ModelTrainingDesc, model_train};
 
-## Dependencies
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // 1. Initialize model context and build computation graph
+    let mut model = ModelContext::create();
+    create_mnist_model(&mut model)?;
 
-- `rand` - Random number generation for weight initialization and data shuffling
-- `bitflags` - Efficient bitflag implementation for variable flags
-- `mnist` - MNIST dataset loader (for the example)
+    // 2. Compile forward and cost execution programs (topological sort)
+    model_compile(&mut model);
+
+    // 3. Prepare data and train
+    // let (train_imgs, train_lbls, test_imgs, test_lbls) = prepare_mnist_data(...);
+    // let desc = ModelTrainingDesc {
+    //     train_images: train_imgs,
+    //     train_labels: train_lbls,
+    //     test_images: test_imgs,
+    //     test_labels: test_lbls,
+    //     epochs: 5,
+    //     batch_size: 32,
+    //     learning_rate: 0.01,
+    // };
+    // model_train(&mut model, &desc)?;
+
+    Ok(())
+}
+```
+
+---
 
 ## Quick Start
 
-1. Clone the repository:
+### 1. Prerequisites
+Ensure you have the Rust toolchain (2024 edition supported) installed:
 ```bash
-git clone <repo-url>
-cd ml-lib-rust
+rustc --version
+cargo --version
 ```
 
-2. Download MNIST data:
+### 2. Download MNIST Dataset
+Place the uncompressed binary IDX files inside a `data/` directory at the project root:
 ```bash
-mkdir -p data
-cd data
+mkdir -p data && cd data
 wget https://storage.googleapis.com/cvdf-datasets/mnist/train-images-idx3-ubyte.gz
 wget https://storage.googleapis.com/cvdf-datasets/mnist/train-labels-idx1-ubyte.gz
 wget https://storage.googleapis.com/cvdf-datasets/mnist/t10k-images-idx3-ubyte.gz
@@ -234,17 +262,32 @@ gunzip *.gz
 cd ..
 ```
 
-3. Run the MNIST training example:
+### 3. Run Training
 ```bash
 cargo run --release
 ```
 
-## Architecture
+Sample output:
+```text
+Loading MNIST dataset...
+Dataset loaded.
+Preparing data...
+Creating model...
+Starting training...
 
-The library is built around a computational graph where each operation creates new nodes. The graph is compiled into efficient execution programs through topological sorting, with automatic index remapping for correctness.
+Epoch  1 /  5, Batch 1562 / 1562, Average Cost: 0.3210
+Test Completed. Accuracy:  9280 / 10000 (92.8%), Average Cost: 0.2814
+...
+Epoch  5 /  5, Batch 1562 / 1562, Average Cost: 0.1542
+Test Completed. Accuracy:  9512 / 10000 (95.1%), Average Cost: 0.1705
 
-### Key Implementation Details
+Training complete!
+```
 
-- **Index Remapping**: When creating execution programs, variable indices are remapped from the global graph to program-local indices to ensure correct dependency resolution.
-- **Gradient Accumulation**: Gradients flow backward through the graph, accumulating at parameter nodes.
-- **Clone-on-Store**: Variables are cloned when added to the graph to maintain proper ownership semantics.
+---
+
+## Key Architecture & Design Principles
+
+- **Shared Ownership via `Rc<RefCell<Matrix>>`**: Graph variables hold reference-counted pointers to matrices. When execution programs (`ModelProgram`) are compiled from the graph, they reference the same underlying matrix buffers. This eliminates memory copying between the graph, execution programs, and outside callers.
+- **Topological Index Remapping**: The user constructs nodes with global graph identifiers. During compilation (`ModelContext::create_program`), a depth-first traversal orders only required dependency nodes and remaps their input edges into a dense, contiguous array for sequential cache-friendly iteration.
+- **Reverse-Mode Automatic Differentiation**: Gradients are seeded at the cost node ($\frac{\partial C}{\partial C} = 1.0$) and propagated backwards in reverse topological order. Parameters accumulate gradients across mini-batch samples before step updates.
